@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+.venv/
+venv/
+
+# 資料檔太大不進 repo
+*.pkl
+data/
+LSWMD.pkl
+
+# 模型 checkpoint
+*.pt
+*.pth
+models/
