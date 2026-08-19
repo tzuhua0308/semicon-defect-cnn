@@ -1,6 +1,6 @@
 # WM-811K Wafer Defect Classification
 
-PyTorch CNN pipeline for classifying 9 wafer defect patterns from the WM-811K dataset. Baseline model achieves **Macro F1 0.717** on 30K-wafer test split, with a v2 iteration targeting rare-class recall (Scratch, Donut) via augmentation and class weighting.
+PyTorch CNN pipeline for classifying 9 wafer defect patterns from the WM-811K dataset. v1 baseline reaches **Macro F1 0.734**; v2 adds augmentation + balanced class weights and nearly doubles the hardest class (Scratch F1 **0.192 → 0.351**) — macro F1 drops to 0.688, but in a yield-inspection setting missing a Scratch is far more expensive than a false alarm on `none`, so **v2 is the model chosen for production framing**.
 
 > Sister project: [SECOM Yield Analysis](https://github.com/tzuhua0308/semicon-yield-dashboard) — same domain (semiconductor manufacturing), complementary technique (tabular ML + SQL/Dashboard).
 >
@@ -80,31 +80,46 @@ Input (B, 1, 64, 64)
 
 ## Results
 
-### v1 — Baseline
+### v1 — Baseline (no augmentation, no class weight)
 
 | Metric | Value |
 |---|---|
-| Best val accuracy | **0.8018** |
-| Test macro F1 | **0.717** |
-| Test weighted F1 | (fill in) |
+| Best val accuracy | 0.825 |
+| Test macro F1 | **0.7338** |
+| Test weighted F1 | 0.8176 |
 
 **Weakness diagnosis:**
-- `Scratch` recall: **1.7%** — thin diagonal patterns get smeared by 64×64 resize
-- `Donut` recall: **42%** — only 555 total samples, model rarely sees it
+- `Scratch` F1 = **0.192** (precision 1.0 but recall only **10.6%**) — the model knows what Scratch looks like, but rarely dares to predict it. Thin diagonal patterns lose most of their signal after 64×64 resize.
+- `Donut` recall = 47% (only 555 total samples; the model rarely sees it)
+- `Loc` precision = 0.59 (the majority-class loss signal dilutes fine boundary learning)
 
-![v1 confusion matrix](docs/confusion_matrix_v1.png)
+### v2 — Augmentation + Balanced Weights (**rare-class winner**)
 
-### v2 — Augmentation + Class Weights
+**Techniques:**
+- **Augmentation:** `RandomHorizontalFlip` + `RandomVerticalFlip` + `RandomRotation(180°, NEAREST interp)`
+- **Class weights:** `sklearn.compute_class_weight('balanced')` → `CrossEntropyLoss(weight=...)` (Near-full 22.8x, Donut 6.1x, Scratch 2.8x)
 
-Techniques applied:
-- **Data augmentation:** RandomHorizontalFlip, RandomVerticalFlip, RandomRotation(180°, NEAREST interpolation)
-- **Class weighting:** `sklearn.compute_class_weight('balanced')` → `CrossEntropyLoss(weight=...)`
-
-| Class | v1 F1 | v2 F1 | Δ |
+| Metric | v1 | v2 | Δ |
 |---|---|---|---|
-| _(fill in from notebook rerun)_ | | | |
+| Test macro F1 | 0.7338 | 0.6876 | -0.046 |
+| Test weighted F1 | 0.8176 | 0.7489 | -0.069 |
+| **Scratch F1** | 0.192 | **0.351** | **+0.159 ↑** |
+| **Scratch recall** | 0.106 | **0.274** | **+0.168 ↑** |
+| **Donut recall** | 0.470 | **0.723** | **+0.253 ↑** |
+| Near-full recall | 0.955 | 0.955 | 0 |
+| Random recall | 0.808 | 0.923 | +0.115 ↑ |
 
-![v2 confusion matrix](docs/confusion_matrix_v2.png)
+**Why v2 is the model production would actually ship:**
+
+In a fab yield setting, **missing a Scratch (false negative) is far more expensive than mislabeling a `none` as something rare (false positive)** — the former lets a defective wafer flow downstream; the latter just triggers one extra visual review. The business-driven metric is rare-class recall, not macro F1. v2 trades 5pp of macro F1 for a nearly 2× Scratch F1 and +25pp Donut recall — the right trade-off in this domain.
+
+### v3 — sqrt-smoothed weights (**failed experiment, kept to show iteration**)
+
+**Hypothesis:** v2's weights are too extreme (Near-full 22.8x). Applying `sqrt` compression to 4.8x should preserve the rare-class boost without crushing the majority classes.
+
+**Result:** Macro F1 0.6744 (worse than v2), Scratch F1 collapsed to **0.115**.
+
+**Diagnosis:** `sqrt` compresses the top correctly, but it also flattens Scratch (2.84 → 1.69) and Random (3.92 → 1.98) — bringing their weights close to the majority classes, so the model stops learning them again. **Lesson:** don't apply `sqrt` uniformly to all classes; compress only the top-k, or switch to focal loss to let the model auto-focus on hard examples.
 
 ---
 
@@ -141,9 +156,10 @@ Techniques applied:
 
 ## Roadmap
 
-- [x] v1 baseline CNN
-- [x] v2 augmentation + class weights (code)
-- [ ] v2 rerun + results
+- [x] v1 baseline CNN (Macro F1 0.734)
+- [x] v2 augmentation + balanced weights (rare-class winner: Scratch F1 +82%)
+- [x] v3 sqrt-weighted retry (failed: 0.674, documented at end of notebook)
+- [ ] v4 candidate: focal loss (γ=2) — dynamic weighting of hard examples, best shot at truly beating v1 on macro F1
+- [ ] v4 candidate: 96×96 or 128×128 resize — root-cause fix for Scratch's thin-diagonal feature loss
 - [ ] SHAP / Grad-CAM visualization (which pixels drove each prediction)
-- [ ] Try higher resolution (96×96 or 128×128) to rescue Scratch recall
-- [ ] Streamlit demo — upload wafer image → predict pattern
+- [ ] Streamlit demo — upload a wafer image → predict pattern

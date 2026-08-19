@@ -1,6 +1,6 @@
 # WM-811K 晶圓缺陷分類
 
-用 PyTorch CNN 對 WM-811K 資料集的 9 種晶圓缺陷 pattern 做分類。Baseline 模型在 30K 張晶圓的 test set 上達到 **Macro F1 0.717**，v2 版加入資料擴增與類別權重，目標救回少數類（Scratch、Donut）的 recall。
+用 PyTorch CNN 對 WM-811K 資料集的 9 種晶圓缺陷 pattern 做分類。v1 baseline 在 test set 拿到 **Macro F1 0.734**，v2 加入資料擴增 + 平衡權重把最難的 Scratch F1 從 **0.192 → 0.351**（近 2x）——雖然 macro F1 掉到 0.688，但在良率場域裡「漏掉一個 Scratch」比「誤報 none」貴得多，v2 才是實務會採用的模型。
 
 > 姐妹作：[SECOM Yield Analysis](https://github.com/tzuhua0308/semicon-yield-dashboard) — 同樣是半導體製造領域，但用互補的技術（tabular ML + SQL/Dashboard）。
 >
@@ -80,31 +80,46 @@ Input (B, 1, 64, 64)
 
 ## 結果
 
-### v1 — Baseline
+### v1 — Baseline（無 augmentation、無 class weight）
 
 | 指標 | 數值 |
 |---|---|
-| Best val accuracy | **0.8018** |
-| Test macro F1 | **0.717** |
-| Test weighted F1 | （待補） |
+| Best val accuracy | 0.825 |
+| Test macro F1 | **0.7338** |
+| Test weighted F1 | 0.8176 |
 
 **弱點診斷：**
-- `Scratch` recall：**1.7%** — 細長對角 pattern 被 64×64 resize 抹掉
-- `Donut` recall：**42%** — 總共只有 555 筆樣本，模型很少看到
+- `Scratch` F1 = **0.192**（precision 1.0、recall 只有 **10.6%**）——模型知道 Scratch 長什麼樣，只是不敢多預測。細長對角 pattern 被 64×64 resize 抹掉大部分特徵。
+- `Donut` recall = 47%（總共只有 555 筆樣本，模型看得少）
+- `Loc` precision = 0.59（多數類 loss 訊號稀釋了細部邊界學習）
 
-![v1 confusion matrix](docs/confusion_matrix_v1.png)
+### v2 — 資料擴增 + 平衡權重（**rare-class 贏家**）
 
-### v2 — 資料擴增 + 類別權重
+**手法：**
+- **Augmentation：** `RandomHorizontalFlip` + `RandomVerticalFlip` + `RandomRotation(180°, NEAREST 插值)`
+- **Class weight：** `sklearn.compute_class_weight('balanced')` → `CrossEntropyLoss(weight=...)`（Near-full 22.8x、Donut 6.1x、Scratch 2.8x）
 
-採用手法：
-- **資料擴增：** RandomHorizontalFlip、RandomVerticalFlip、RandomRotation(180°, NEAREST 插值)
-- **類別權重：** `sklearn.compute_class_weight('balanced')` → `CrossEntropyLoss(weight=...)`
-
-| 類別 | v1 F1 | v2 F1 | Δ |
+| 指標 | v1 | v2 | Δ |
 |---|---|---|---|
-| _（notebook 重跑後填入）_ | | | |
+| Test macro F1 | 0.7338 | 0.6876 | -0.046 |
+| Test weighted F1 | 0.8176 | 0.7489 | -0.069 |
+| **Scratch F1** | 0.192 | **0.351** | **+0.159 ↑** |
+| **Scratch recall** | 0.106 | **0.274** | **+0.168 ↑** |
+| **Donut recall** | 0.470 | **0.723** | **+0.253 ↑** |
+| Near-full recall | 0.955 | 0.955 | 0 |
+| Random recall | 0.808 | 0.923 | +0.115 ↑ |
 
-![v2 confusion matrix](docs/confusion_matrix_v2.png)
+**為什麼 v2 才是實務會採用的模型？**
+
+在 fab 良率場域，**漏掉一個 Scratch 缺陷（false negative）比錯報一個 none（false positive）貴得多**——前者可能讓不良晶圓進入下一站，後者只是多做一次目視 review。business-driven metric 是稀有類的 recall，不是 macro F1。v2 用 5pp macro F1 換到 Scratch F1 幾乎翻倍、Donut recall +25pp，符合這個 trade-off。
+
+### v3 — 嘗試 sqrt 平滑權重（**失敗實驗，保留以顯示迭代思維**）
+
+**假設：** v2 的權重太極端（Near-full 22.8x），用 `sqrt` 壓縮到 4.8x 應該能保留 rare-class boost 又不會壓垮多數類。
+
+**結果：** Macro F1 0.6744（比 v2 還低）、Scratch F1 崩到 **0.115**。
+
+**診斷：** sqrt 對「頂端」有效沒錯，但把 Scratch（2.84 → 1.69）和 Random（3.92 → 1.98）也一起壓扁。這兩類的權重和多數類差不多後，模型又回到不去救稀有類的行為。**教訓：不該全類一起 sqrt，該只對 top-k 壓縮，或改用 focal loss 讓模型自己找 hard example。**
 
 ---
 
@@ -141,9 +156,10 @@ Input (B, 1, 64, 64)
 
 ## Roadmap
 
-- [x] v1 baseline CNN
-- [x] v2 augmentation + class weights（code 已完成）
-- [ ] v2 重跑 + 結果
+- [x] v1 baseline CNN（Macro F1 0.734）
+- [x] v2 augmentation + balanced weights（rare-class 贏家：Scratch F1 +82%）
+- [x] v3 sqrt-weighted retry（失敗：0.674，記錄於 notebook 尾）
+- [ ] v4 candidate：focal loss（γ=2）——動態加權 hard 樣本，最有機會真正超越 v1 macro F1
+- [ ] v4 candidate：96×96 或 128×128 resize——從根本解 Scratch 的細對角特徵遺失
 - [ ] SHAP / Grad-CAM 視覺化（哪些 pixel 主導每個預測）
-- [ ] 嘗試更高解析度（96×96 或 128×128）救 Scratch recall
 - [ ] Streamlit demo — 上傳晶圓圖 → 預測 pattern
