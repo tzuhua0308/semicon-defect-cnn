@@ -145,7 +145,7 @@ Input (B, 1, 64, 64)
 
 ---
 
-## 技術選型（面試可講的重點）
+## 技術選型
 
 - **用 `cv2.INTER_NEAREST` 而不是 bilinear** — 晶圓圖是離散類別 `{0=空、1=良品 die、2=不良 die}`，用平滑插值會產生沒有意義的中間值。
 - **把 `none` downsample 到 5,000** — 保留多數類當參考，同時不讓它主導 loss 訊號。另一條路是只用 `class_weight='balanced'`，但為了訓練速度選擇 downsample + weighting 併用。
